@@ -4,6 +4,7 @@ package apigateway
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	"github.com/sivchari/kumo/internal/service"
@@ -71,6 +72,22 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.HandleFunc("GET", "/apigateway/restapis/{restApiId}/stages", s.GetStages)
 	r.HandleFunc("GET", "/apigateway/restapis/{restApiId}/stages/{stageName}", s.GetStage)
 	r.HandleFunc("DELETE", "/apigateway/restapis/{restApiId}/stages/{stageName}", s.DeleteStage)
+
+	// Invoke endpoint that executes a deployed REST API. The {rest...} catch-all
+	// captures the remaining path segments so resource matching can resolve them
+	// against the API Gateway resource tree.
+	for _, method := range []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodOptions,
+		http.MethodHead,
+	} {
+		r.HandleFunc(method, "/apigateway/_invoke/{restApiId}/{stageName}/{rest...}", s.InvokeAPI)
+		r.HandleFunc(method, "/apigateway/_invoke/{restApiId}/{stageName}", s.InvokeAPI)
+	}
 }
 
 // Close saves the storage state if persistence is enabled.
