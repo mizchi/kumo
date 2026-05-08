@@ -326,6 +326,13 @@ func (s *Service) HeadBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListObjects handles GET /{bucket} - list objects in a bucket.
+//
+// The same handler answers both ListObjects (V1) and ListObjectsV2 requests.
+// V2 is signalled by the list-type=2 query parameter and uses
+// ContinuationToken / StartAfter / NextContinuationToken; V1 uses
+// Marker / NextMarker. We populate only the fields appropriate for the
+// version the caller asked for so SDK clients of either version see the
+// expected XML.
 func (s *Service) ListObjects(w http.ResponseWriter, r *http.Request) {
 	bucket := r.PathValue("bucket")
 	if bucket == "" {
@@ -334,17 +341,37 @@ func (s *Service) ListObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prefix := r.URL.Query().Get("prefix")
-	delimiter := r.URL.Query().Get("delimiter")
-	maxKeys := 1000
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	delimiter := q.Get("delimiter")
+	maxKeys := parseMaxKeys(q.Get("max-keys"))
+	isV2 := q.Get("list-type") == "2"
 
-	if maxKeysStr := r.URL.Query().Get("max-keys"); maxKeysStr != "" {
-		if mk, err := strconv.Atoi(maxKeysStr); err == nil && mk > 0 {
-			maxKeys = mk
+	// Determine where to start listing. ContinuationToken (V2) takes
+	// precedence over StartAfter (V2); V1 uses Marker.
+	var (
+		continuationToken string
+		startAfter        string
+		marker            string
+	)
+
+	if isV2 {
+		continuationToken = q.Get("continuation-token")
+		startAfter = q.Get("start-after")
+	} else {
+		marker = q.Get("marker")
+	}
+
+	listAfter := continuationToken
+	if listAfter == "" {
+		if isV2 {
+			listAfter = startAfter
+		} else {
+			listAfter = marker
 		}
 	}
 
-	objects, commonPrefixes, err := s.storage.ListObjects(r.Context(), bucket, prefix, delimiter, maxKeys)
+	objects, commonPrefixes, truncated, err := s.storage.ListObjects(r.Context(), bucket, prefix, delimiter, listAfter, maxKeys)
 	if err != nil {
 		var bucketErr *BucketError
 		if errors.As(err, &bucketErr) {
@@ -374,15 +401,50 @@ func (s *Service) ListObjects(w http.ResponseWriter, r *http.Request) {
 		prefixes[i] = CommonPrefix{Prefix: p}
 	}
 
+	// AWS uses the last returned key as the next page cursor. CommonPrefixes
+	// can be later than the last Contents key when delimiter is in play, so
+	// take the maximum across both.
+	nextCursor := ""
+	if truncated {
+		if n := len(objects); n > 0 {
+			nextCursor = objects[n-1].Key
+		}
+
+		for _, p := range commonPrefixes {
+			if p > nextCursor {
+				nextCursor = p
+			}
+		}
+	}
+
 	result := ListBucketResult{
 		Xmlns:          s3Namespace,
 		Name:           bucket,
 		Prefix:         prefix,
-		KeyCount:       len(objects),
+		Delimiter:      delimiter,
+		KeyCount:       len(objects) + len(commonPrefixes),
 		MaxKeys:        maxKeys,
-		IsTruncated:    false,
+		IsTruncated:    truncated,
 		Contents:       contents,
 		CommonPrefixes: prefixes,
+	}
+
+	if isV2 {
+		result.ContinuationToken = continuationToken
+		result.StartAfter = startAfter
+		if truncated {
+			result.NextContinuationToken = nextCursor
+		}
+	} else {
+		// V1 fields. KeyCount is V2-only, omit it.
+		result.KeyCount = 0
+		result.Marker = marker
+		if truncated {
+			// V1's NextMarker is only meaningful when delimiter is set; for
+			// undelimited listings AWS recommends the client use the last
+			// returned key. We populate it unconditionally for caller convenience.
+			result.NextMarker = nextCursor
+		}
 	}
 
 	writeXMLResponse(w, result)

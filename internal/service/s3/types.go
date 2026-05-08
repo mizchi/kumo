@@ -70,19 +70,27 @@ type BucketInfo struct {
 	BucketArn    string `xml:"BucketArn"`
 }
 
-// ListBucketResult is the response for ListObjectsV2.
+// ListBucketResult is the response for ListObjects (V1) and ListObjectsV2.
+//
+// Most fields are shared. The version-specific fields are emitted only when
+// the corresponding listing version is in use:
+//   - V2 uses ContinuationToken / NextContinuationToken / StartAfter / KeyCount
+//   - V1 uses Marker / NextMarker
 type ListBucketResult struct {
 	XMLName               xml.Name       `xml:"ListBucketResult"`
 	Xmlns                 string         `xml:"xmlns,attr"`
 	Name                  string         `xml:"Name"`
 	Prefix                string         `xml:"Prefix"`
-	KeyCount              int            `xml:"KeyCount"`
+	Delimiter             string         `xml:"Delimiter,omitempty"`
+	KeyCount              int            `xml:"KeyCount,omitempty"`
 	MaxKeys               int            `xml:"MaxKeys"`
 	IsTruncated           bool           `xml:"IsTruncated"`
 	Contents              []ObjectInfo   `xml:"Contents"`
 	ContinuationToken     string         `xml:"ContinuationToken,omitempty"`
 	NextContinuationToken string         `xml:"NextContinuationToken,omitempty"`
 	StartAfter            string         `xml:"StartAfter,omitempty"`
+	Marker                string         `xml:"Marker,omitempty"`
+	NextMarker            string         `xml:"NextMarker,omitempty"`
 	CommonPrefixes        []CommonPrefix `xml:"CommonPrefixes,omitempty"`
 }
 
