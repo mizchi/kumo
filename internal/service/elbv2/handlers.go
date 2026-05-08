@@ -429,6 +429,32 @@ func (s *Service) DescribeTargetGroupAttributes(w http.ResponseWriter, r *http.R
 	})
 }
 
+// xmlDescribeListenerAttrResponse is shared by Describe and Modify
+// ListenerAttributes; the wrapping element name differs but the body
+// shape is identical.
+type xmlDescribeListenerAttrResponse struct {
+	XMLName          xml.Name              `xml:"DescribeListenerAttributesResponse"`
+	Xmlns            string                `xml:"xmlns,attr"`
+	Result           xmlListenerAttrResult `xml:"DescribeListenerAttributesResult"`
+	ResponseMetadata XMLResponseMetadata   `xml:"ResponseMetadata"`
+}
+
+type xmlListenerAttrResult struct {
+	Attributes XMLAttributePairs `xml:"Attributes"`
+}
+
+// DescribeListenerAttributes returns an empty attribute set. Listener
+// attributes are not modeled but AWS clients read them on every listener
+// refresh, so we surface an empty payload to keep the read path from
+// hitting InvalidAction.
+func (s *Service) DescribeListenerAttributes(w http.ResponseWriter, _ *http.Request) {
+	writeELBXMLResponse(w, xmlDescribeListenerAttrResponse{
+		Xmlns:            elbXMLNS,
+		Result:           xmlListenerAttrResult{Attributes: XMLAttributePairs{Members: []XMLAttributePair{}}},
+		ResponseMetadata: XMLResponseMetadata{RequestID: uuid.New().String()},
+	})
+}
+
 // readAttributesRequestForm extracts the resource ARN and the
 // Attributes.member.N.{Key,Value} pairs from the AWS Query form.
 func readAttributesRequestForm(r *http.Request, arnField string) (string, map[string]string, error) {
@@ -548,6 +574,8 @@ func (s *Service) getActionHandler(action string) func(http.ResponseWriter, *htt
 		"DescribeLoadBalancerAttributes": s.DescribeLoadBalancerAttributes,
 		"ModifyTargetGroupAttributes":    s.ModifyTargetGroupAttributes,
 		"DescribeTargetGroupAttributes":  s.DescribeTargetGroupAttributes,
+		"DescribeListenerAttributes":     s.DescribeListenerAttributes,
+		"ModifyListenerAttributes":       s.DescribeListenerAttributes,
 	}
 
 	return handlers[action]

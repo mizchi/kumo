@@ -65,6 +65,8 @@ func (s *Service) Actions() []string {
 		"DescribeLoadBalancerAttributes",
 		"ModifyTargetGroupAttributes",
 		"DescribeTargetGroupAttributes",
+		"DescribeListenerAttributes",
+		"ModifyListenerAttributes",
 	}
 }
 
