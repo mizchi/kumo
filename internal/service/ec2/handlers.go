@@ -213,7 +213,7 @@ func (s *Service) CreateSecurityGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyTagsOnCreate(r, s.storage, sg.GroupID, "security-group", &sg.Tags)
+	applyTagsOnCreate(r, s.storage, sg.GroupID, "security-group")
 
 	writeEC2XMLResponse(w, XMLCreateSecurityGroupResponse{
 		Xmlns:     ec2XMLNS,
@@ -425,7 +425,7 @@ func (s *Service) CreateVpc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyTagsOnCreate(r, s.storage, vpc.VpcID, "vpc", &vpc.Tags)
+	applyTagsOnCreate(r, s.storage, vpc.VpcID, "vpc")
 
 	writeEC2XMLResponse(w, XMLCreateVpcResponse{
 		Xmlns:     ec2XMLNS,
@@ -435,11 +435,13 @@ func (s *Service) CreateVpc(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyTagsOnCreate copies TagSpecifications from the form (if any) onto the
-// just-created resource, both via the storage tag API (so DescribeTags works)
-// and into the response struct (so the create response includes the tags as
-// AWS does). The resourceType matches the AWS TagSpecifications.ResourceType
-// values: "vpc", "subnet", "internet-gateway", "route-table", "security-group".
-func applyTagsOnCreate(r *http.Request, storage Storage, resourceID, resourceType string, dst *[]Tag) {
+// just-created resource via the storage tag API. Storage.CreateTags upserts in
+// place, and the existing Storage.Create* methods return the storage-owned
+// pointer, so the caller's resource value reflects the new tags by the time
+// this returns — no further mutation needed. resourceType matches the AWS
+// TagSpecifications.ResourceType values: "vpc", "subnet", "internet-gateway",
+// "route-table", "security-group".
+func applyTagsOnCreate(r *http.Request, storage Storage, resourceID, resourceType string) {
 	if err := r.ParseForm(); err != nil {
 		return
 	}
@@ -450,7 +452,6 @@ func applyTagsOnCreate(r *http.Request, storage Storage, resourceID, resourceTyp
 	}
 
 	_ = storage.CreateTags(r.Context(), []string{resourceID}, tags)
-	*dst = append(*dst, tags...)
 }
 
 // DeleteVpc handles the DeleteVpc action.
@@ -537,7 +538,7 @@ func (s *Service) CreateSubnet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyTagsOnCreate(r, s.storage, subnet.SubnetID, "subnet", &subnet.Tags)
+	applyTagsOnCreate(r, s.storage, subnet.SubnetID, "subnet")
 
 	writeEC2XMLResponse(w, XMLCreateSubnetResponse{
 		Xmlns:     ec2XMLNS,
@@ -618,7 +619,7 @@ func (s *Service) CreateInternetGateway(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	applyTagsOnCreate(r, s.storage, igw.InternetGatewayID, "internet-gateway", &igw.Tags)
+	applyTagsOnCreate(r, s.storage, igw.InternetGatewayID, "internet-gateway")
 
 	writeEC2XMLResponse(w, XMLCreateInternetGatewayResponse{
 		Xmlns:           ec2XMLNS,
@@ -711,7 +712,7 @@ func (s *Service) CreateRouteTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyTagsOnCreate(r, s.storage, rt.RouteTableID, "route-table", &rt.Tags)
+	applyTagsOnCreate(r, s.storage, rt.RouteTableID, "route-table")
 
 	writeEC2XMLResponse(w, XMLCreateRouteTableResponse{
 		Xmlns:      ec2XMLNS,
