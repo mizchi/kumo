@@ -213,6 +213,8 @@ func (s *Service) CreateSecurityGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, sg.GroupID, "security-group", &sg.Tags)
+
 	writeEC2XMLResponse(w, XMLCreateSecurityGroupResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
@@ -423,11 +425,32 @@ func (s *Service) CreateVpc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, vpc.VpcID, "vpc", &vpc.Tags)
+
 	writeEC2XMLResponse(w, XMLCreateVpcResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
 		Vpc:       convertToXMLVpc(vpc),
 	})
+}
+
+// applyTagsOnCreate copies TagSpecifications from the form (if any) onto the
+// just-created resource, both via the storage tag API (so DescribeTags works)
+// and into the response struct (so the create response includes the tags as
+// AWS does). The resourceType matches the AWS TagSpecifications.ResourceType
+// values: "vpc", "subnet", "internet-gateway", "route-table", "security-group".
+func applyTagsOnCreate(r *http.Request, storage Storage, resourceID, resourceType string, dst *[]Tag) {
+	if err := r.ParseForm(); err != nil {
+		return
+	}
+
+	tags := parseTagSpecificationsForResourceType(r.Form, resourceType)
+	if len(tags) == 0 {
+		return
+	}
+
+	_ = storage.CreateTags(r.Context(), []string{resourceID}, tags)
+	*dst = append(*dst, tags...)
 }
 
 // DeleteVpc handles the DeleteVpc action.
@@ -514,6 +537,8 @@ func (s *Service) CreateSubnet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, subnet.SubnetID, "subnet", &subnet.Tags)
+
 	writeEC2XMLResponse(w, XMLCreateSubnetResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
@@ -592,6 +617,8 @@ func (s *Service) CreateInternetGateway(w http.ResponseWriter, r *http.Request) 
 
 		return
 	}
+
+	applyTagsOnCreate(r, s.storage, igw.InternetGatewayID, "internet-gateway", &igw.Tags)
 
 	writeEC2XMLResponse(w, XMLCreateInternetGatewayResponse{
 		Xmlns:           ec2XMLNS,
@@ -683,6 +710,8 @@ func (s *Service) CreateRouteTable(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	applyTagsOnCreate(r, s.storage, rt.RouteTableID, "route-table", &rt.Tags)
 
 	writeEC2XMLResponse(w, XMLCreateRouteTableResponse{
 		Xmlns:      ec2XMLNS,
@@ -843,6 +872,606 @@ func (s *Service) DescribeNatGateways(w http.ResponseWriter, r *http.Request) {
 		RequestID:     uuid.New().String(),
 		NatGatewaySet: XMLNatGatewaySet{Items: xmlNatgws},
 	})
+}
+
+// DetachInternetGateway handles the DetachInternetGateway action.
+func (s *Service) DetachInternetGateway(w http.ResponseWriter, r *http.Request) {
+	var req AttachInternetGatewayRequest
+	if err := readEC2JSONRequest(r, &req); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse request body", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DetachInternetGateway(r.Context(), req.InternetGatewayID, req.VpcID); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"DetachInternetGatewayResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DeleteInternetGateway handles the DeleteInternetGateway action.
+func (s *Service) DeleteInternetGateway(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	igwID := r.Form.Get("InternetGatewayId")
+	if igwID == "" {
+		writeError(w, errInvalidParameter, "InternetGatewayId is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DeleteInternetGateway(r.Context(), igwID); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"DeleteInternetGatewayResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DeleteRoute handles the DeleteRoute action.
+func (s *Service) DeleteRoute(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	rtbID := r.Form.Get("RouteTableId")
+	cidr := r.Form.Get("DestinationCidrBlock")
+
+	if rtbID == "" || cidr == "" {
+		writeError(w, errInvalidParameter, "RouteTableId and DestinationCidrBlock are required", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DeleteRoute(r.Context(), rtbID, cidr); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"DeleteRouteResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DeleteRouteTable handles the DeleteRouteTable action.
+func (s *Service) DeleteRouteTable(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	rtbID := r.Form.Get("RouteTableId")
+	if rtbID == "" {
+		writeError(w, errInvalidParameter, "RouteTableId is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DeleteRouteTable(r.Context(), rtbID); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"DeleteRouteTableResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DisassociateRouteTable handles the DisassociateRouteTable action.
+func (s *Service) DisassociateRouteTable(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	assocID := r.Form.Get("AssociationId")
+	if assocID == "" {
+		writeError(w, errInvalidParameter, "AssociationId is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DisassociateRouteTable(r.Context(), assocID); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"DisassociateRouteTableResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DescribeNetworkInterfaces returns an empty list. ENIs are not modeled in
+// kumo, but the AWS provider issues this read during SG / VPC tear-down to
+// confirm there is nothing else attached.
+func (s *Service) DescribeNetworkInterfaces(w http.ResponseWriter, _ *http.Request) {
+	writeEC2XMLResponse(w, struct {
+		XMLName             xml.Name `xml:"DescribeNetworkInterfacesResponse"`
+		Xmlns               string   `xml:"xmlns,attr"`
+		RequestID           string   `xml:"requestId"`
+		NetworkInterfaceSet struct{} `xml:"networkInterfaceSet"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String()})
+}
+
+// DescribeSecurityGroups handles the DescribeSecurityGroups action.
+func (s *Service) DescribeSecurityGroups(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	groupIDs := parseIndexedListFromForm(r.Form, "GroupId")
+	groupNames := parseIndexedListFromForm(r.Form, "GroupName")
+
+	sgs, err := s.storage.DescribeSecurityGroups(r.Context(), groupIDs, groupNames)
+	if err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	items := make([]XMLSecurityGroup, 0, len(sgs))
+	for _, sg := range sgs {
+		items = append(items, convertToXMLSecurityGroup(sg))
+	}
+
+	writeEC2XMLResponse(w, XMLDescribeSecurityGroupsResponse{
+		Xmlns:            ec2XMLNS,
+		RequestID:        uuid.New().String(),
+		SecurityGroupSet: XMLSecurityGroupSet{Items: items},
+	})
+}
+
+// RevokeSecurityGroupIngress handles the RevokeSecurityGroupIngress action.
+// IpPermissions.N parsing is best-effort; if no permissions are supplied
+// (e.g. during a Terraform destroy of an empty SG), this is a no-op.
+func (s *Service) RevokeSecurityGroupIngress(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	groupID := r.Form.Get("GroupId")
+	groupName := r.Form.Get("GroupName")
+	permissions := parseIPPermissionsFromForm(r.Form)
+
+	if err := s.storage.RevokeSecurityGroupIngress(r.Context(), groupID, groupName, permissions); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, XMLRevokeSecurityGroupIngressResponse{
+		Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true,
+	})
+}
+
+// RevokeSecurityGroupEgress handles the RevokeSecurityGroupEgress action.
+func (s *Service) RevokeSecurityGroupEgress(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	groupID := r.Form.Get("GroupId")
+	permissions := parseIPPermissionsFromForm(r.Form)
+
+	if err := s.storage.RevokeSecurityGroupEgress(r.Context(), groupID, permissions); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, XMLRevokeSecurityGroupEgressResponse{
+		Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true,
+	})
+}
+
+// parseIPPermissionsFromForm reads IpPermissions.N.{IpProtocol,FromPort,ToPort}
+// and IpPermissions.N.IpRanges.M.CidrIp from the AWS Query form.
+func parseIPPermissionsFromForm(form map[string][]string) []IPPermission {
+	byIdx := make(map[int]*IPPermission)
+
+	for key, values := range form {
+		applyIPPermissionFormEntry(byIdx, key, values)
+	}
+
+	indexes := make([]int, 0, len(byIdx))
+	for n := range byIdx {
+		indexes = append(indexes, n)
+	}
+
+	sort.Ints(indexes)
+
+	out := make([]IPPermission, 0, len(indexes))
+	for _, n := range indexes {
+		out = append(out, *byIdx[n])
+	}
+
+	return out
+}
+
+func applyIPPermissionFormEntry(byIdx map[int]*IPPermission, key string, values []string) {
+	suffix, ok := strings.CutPrefix(key, "IpPermissions.")
+	if !ok || len(values) == 0 {
+		return
+	}
+
+	dot := strings.Index(suffix, ".")
+	if dot < 0 {
+		return
+	}
+
+	n, err := strconv.Atoi(suffix[:dot])
+	if err != nil {
+		return
+	}
+
+	entry, exists := byIdx[n]
+	if !exists {
+		entry = &IPPermission{}
+		byIdx[n] = entry
+	}
+
+	setIPPermissionField(entry, suffix[dot+1:], values[0])
+}
+
+func setIPPermissionField(entry *IPPermission, field, value string) {
+	switch {
+	case field == "IpProtocol":
+		entry.IPProtocol = value
+	case field == "FromPort":
+		if v, err := strconv.Atoi(value); err == nil {
+			entry.FromPort = v
+		}
+	case field == "ToPort":
+		if v, err := strconv.Atoi(value); err == nil {
+			entry.ToPort = v
+		}
+	case strings.HasPrefix(field, "IpRanges."):
+		rest := strings.TrimPrefix(field, "IpRanges.")
+
+		rdot := strings.Index(rest, ".")
+		if rdot < 0 {
+			return
+		}
+
+		if rest[rdot+1:] == "CidrIp" {
+			entry.IPRanges = append(entry.IPRanges, IPRange{CidrIP: value})
+		}
+	}
+}
+
+// convertToXMLSecurityGroup converts a SecurityGroup to its XML form.
+func convertToXMLSecurityGroup(sg *SecurityGroup) XMLSecurityGroup {
+	tags := make([]XMLTag, 0, len(sg.Tags))
+	for _, t := range sg.Tags {
+		tags = append(tags, XMLTag(t))
+	}
+
+	return XMLSecurityGroup{
+		OwnerID:             defaultAccountID,
+		GroupID:             sg.GroupID,
+		GroupName:           sg.GroupName,
+		GroupDescription:    sg.Description,
+		VpcID:               sg.VpcID,
+		IPPermissions:       convertToXMLIPPermissionSet(sg.IngressRules),
+		IPPermissionsEgress: convertToXMLIPPermissionSet(sg.EgressRules),
+		TagSet:              XMLTagSet{Items: tags},
+	}
+}
+
+func convertToXMLIPPermissionSet(rules []IPPermission) XMLIPPermissionSet {
+	items := make([]XMLIPPermission, 0, len(rules))
+
+	for _, p := range rules {
+		ranges := make([]XMLIPRange, 0, len(p.IPRanges))
+		for _, ipr := range p.IPRanges {
+			ranges = append(ranges, XMLIPRange(ipr))
+		}
+
+		items = append(items, XMLIPPermission{
+			IPProtocol: p.IPProtocol,
+			FromPort:   p.FromPort,
+			ToPort:     p.ToPort,
+			IPRanges:   XMLIPRanges{Items: ranges},
+		})
+	}
+
+	return XMLIPPermissionSet{Items: items}
+}
+
+// ModifyVpcAttribute handles the ModifyVpcAttribute action. AWS requires
+// each attribute to be modified in a separate call.
+func (s *Service) ModifyVpcAttribute(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	vpcID := r.Form.Get("VpcId")
+	if vpcID == "" {
+		writeError(w, errInvalidParameter, "VpcId is required", http.StatusBadRequest)
+
+		return
+	}
+
+	updates := vpcAttributeUpdates(r.Form)
+
+	if err := s.storage.ModifyVpcAttribute(r.Context(), vpcID, updates); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"ModifyVpcAttributeResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+// DescribeVpcAttribute returns one of EnableDNSHostnames / EnableDNSSupport.
+func (s *Service) DescribeVpcAttribute(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	vpcID := r.Form.Get("VpcId")
+	attribute := r.Form.Get("Attribute")
+
+	if vpcID == "" || attribute == "" {
+		writeError(w, errInvalidParameter, "VpcId and Attribute are required", http.StatusBadRequest)
+
+		return
+	}
+
+	vpcs, err := s.storage.DescribeVpcs(r.Context(), []string{vpcID})
+	if err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	if len(vpcs) == 0 {
+		writeError(w, "InvalidVpcID.NotFound", "The vpc ID '"+vpcID+"' does not exist", http.StatusBadRequest)
+
+		return
+	}
+
+	type valueElem struct {
+		Value bool `xml:"value"`
+	}
+
+	resp := struct {
+		XMLName                          xml.Name   `xml:"DescribeVpcAttributeResponse"`
+		Xmlns                            string     `xml:"xmlns,attr"`
+		RequestID                        string     `xml:"requestId"`
+		VpcID                            string     `xml:"vpcId"`
+		EnableDNSHostnames               *valueElem `xml:"enableDnsHostnames,omitempty"`
+		EnableDNSSupport                 *valueElem `xml:"enableDnsSupport,omitempty"`
+		EnableNetworkAddressUsageMetrics *valueElem `xml:"enableNetworkAddressUsageMetrics,omitempty"`
+	}{
+		Xmlns:     ec2XMLNS,
+		RequestID: uuid.New().String(),
+		VpcID:     vpcID,
+	}
+
+	switch attribute {
+	case "enableDnsHostnames":
+		resp.EnableDNSHostnames = &valueElem{Value: vpcs[0].EnableDNSHostnames}
+	case "enableDnsSupport":
+		resp.EnableDNSSupport = &valueElem{Value: vpcs[0].EnableDNSSupport}
+	case "enableNetworkAddressUsageMetrics":
+		// Not modeled; report disabled by default.
+		resp.EnableNetworkAddressUsageMetrics = &valueElem{Value: false}
+	default:
+		writeError(w, errInvalidParameter, "Unknown attribute "+attribute, http.StatusBadRequest)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, resp)
+}
+
+// ModifySubnetAttribute handles the ModifySubnetAttribute action.
+func (s *Service) ModifySubnetAttribute(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, errInvalidParameter, "Failed to parse form data", http.StatusBadRequest)
+
+		return
+	}
+
+	subnetID := r.Form.Get("SubnetId")
+	if subnetID == "" {
+		writeError(w, errInvalidParameter, "SubnetId is required", http.StatusBadRequest)
+
+		return
+	}
+
+	updates := subnetAttributeUpdates(r.Form)
+
+	if err := s.storage.ModifySubnetAttribute(r.Context(), subnetID, updates); err != nil {
+		handleError(w, err)
+
+		return
+	}
+
+	writeEC2XMLResponse(w, struct {
+		XMLName   xml.Name `xml:"ModifySubnetAttributeResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Return    bool     `xml:"return"`
+	}{Xmlns: ec2XMLNS, RequestID: uuid.New().String(), Return: true})
+}
+
+func vpcAttributeUpdates(form map[string][]string) VpcAttributeUpdates {
+	var u VpcAttributeUpdates
+
+	if v := getFormBoolPtr(form, "EnableDnsHostnames.Value"); v != nil {
+		u.EnableDNSHostnames = v
+	}
+
+	if v := getFormBoolPtr(form, "EnableDnsSupport.Value"); v != nil {
+		u.EnableDNSSupport = v
+	}
+
+	return u
+}
+
+func subnetAttributeUpdates(form map[string][]string) SubnetAttributeUpdates {
+	var u SubnetAttributeUpdates
+
+	if v := getFormBoolPtr(form, "MapPublicIpOnLaunch.Value"); v != nil {
+		u.MapPublicIPOnLaunch = v
+	}
+
+	if v := getFormBoolPtr(form, "AssignIpv6AddressOnCreation.Value"); v != nil {
+		u.AssignIPv6AddressOnCreation = v
+	}
+
+	return u
+}
+
+func getFormBoolPtr(form map[string][]string, key string) *bool {
+	values, ok := form[key]
+	if !ok || len(values) == 0 {
+		return nil
+	}
+
+	b, err := strconv.ParseBool(values[0])
+	if err != nil {
+		return nil
+	}
+
+	return &b
+}
+
+// tagSpec accumulates one TagSpecification.N entry being parsed from form data.
+type tagSpec struct {
+	resourceType string
+	tags         []Tag
+}
+
+// parseTagSpecificationsForResourceType reads TagSpecifications.N.ResourceType
+// and TagSpecifications.N.Tag.M.{Key,Value} from form data, returning the
+// tags whose ResourceType matches `resourceType` (e.g. "vpc", "subnet").
+func parseTagSpecificationsForResourceType(form map[string][]string, resourceType string) []Tag {
+	specs := make(map[int]*tagSpec)
+
+	for key, values := range form {
+		applyTagSpecFormEntry(specs, key, values)
+	}
+
+	for _, sp := range specs {
+		if sp.resourceType == resourceType {
+			return sp.tags
+		}
+	}
+
+	return nil
+}
+
+func applyTagSpecFormEntry(specs map[int]*tagSpec, key string, values []string) {
+	suffix, ok := strings.CutPrefix(key, "TagSpecification.")
+	if !ok || len(values) == 0 {
+		return
+	}
+
+	dot := strings.Index(suffix, ".")
+	if dot < 0 {
+		return
+	}
+
+	n, err := strconv.Atoi(suffix[:dot])
+	if err != nil {
+		return
+	}
+
+	entry, exists := specs[n]
+	if !exists {
+		entry = &tagSpec{}
+		specs[n] = entry
+	}
+
+	setTagSpecField(entry, suffix[dot+1:], values[0])
+}
+
+func setTagSpecField(entry *tagSpec, field, value string) {
+	switch {
+	case field == "ResourceType":
+		entry.resourceType = value
+	case strings.HasPrefix(field, "Tag."):
+		applyTagFromTagSpec(entry, strings.TrimPrefix(field, "Tag."), value)
+	}
+}
+
+func applyTagFromTagSpec(entry *tagSpec, suffix, value string) {
+	tdot := strings.Index(suffix, ".")
+	if tdot < 0 {
+		return
+	}
+
+	m, err := strconv.Atoi(suffix[:tdot])
+	if err != nil {
+		return
+	}
+
+	ensureTag(&entry.tags, m)
+
+	switch suffix[tdot+1:] {
+	case "Key":
+		entry.tags[m-1].Key = value
+	case "Value":
+		entry.tags[m-1].Value = value
+	}
+}
+
+func ensureTag(tags *[]Tag, n int) {
+	for len(*tags) < n {
+		*tags = append(*tags, Tag{})
+	}
 }
 
 // CreateTags handles the CreateTags action.
@@ -1118,6 +1747,9 @@ func (s *Service) getActionHandler(action string) func(http.ResponseWriter, *htt
 		"DeleteSecurityGroup":           s.DeleteSecurityGroup,
 		"AuthorizeSecurityGroupIngress": s.AuthorizeSecurityGroupIngress,
 		"AuthorizeSecurityGroupEgress":  s.AuthorizeSecurityGroupEgress,
+		"DescribeSecurityGroups":        s.DescribeSecurityGroups,
+		"RevokeSecurityGroupIngress":    s.RevokeSecurityGroupIngress,
+		"RevokeSecurityGroupEgress":     s.RevokeSecurityGroupEgress,
 		// Key pair operations
 		"CreateKeyPair":    s.CreateKeyPair,
 		"DeleteKeyPair":    s.DeleteKeyPair,
@@ -1133,12 +1765,19 @@ func (s *Service) getActionHandler(action string) func(http.ResponseWriter, *htt
 		// Internet gateway operations
 		"CreateInternetGateway":    s.CreateInternetGateway,
 		"AttachInternetGateway":    s.AttachInternetGateway,
+		"DetachInternetGateway":    s.DetachInternetGateway,
+		"DeleteInternetGateway":    s.DeleteInternetGateway,
 		"DescribeInternetGateways": s.DescribeInternetGateways,
 		// Route table operations
-		"CreateRouteTable":    s.CreateRouteTable,
-		"CreateRoute":         s.CreateRoute,
-		"AssociateRouteTable": s.AssociateRouteTable,
-		"DescribeRouteTables": s.DescribeRouteTables,
+		"CreateRouteTable":       s.CreateRouteTable,
+		"CreateRoute":            s.CreateRoute,
+		"DeleteRoute":            s.DeleteRoute,
+		"DeleteRouteTable":       s.DeleteRouteTable,
+		"AssociateRouteTable":    s.AssociateRouteTable,
+		"DisassociateRouteTable": s.DisassociateRouteTable,
+		"DescribeRouteTables":    s.DescribeRouteTables,
+		// Network interfaces (stub)
+		"DescribeNetworkInterfaces": s.DescribeNetworkInterfaces,
 		// NAT gateway operations
 		"CreateNatGateway":    s.CreateNatGateway,
 		"DescribeNatGateways": s.DescribeNatGateways,
@@ -1146,6 +1785,10 @@ func (s *Service) getActionHandler(action string) func(http.ResponseWriter, *htt
 		"CreateTags":   s.CreateTags,
 		"DeleteTags":   s.DeleteTags,
 		"DescribeTags": s.DescribeTags,
+		// VPC / Subnet attribute operations
+		"ModifyVpcAttribute":    s.ModifyVpcAttribute,
+		"DescribeVpcAttribute":  s.DescribeVpcAttribute,
+		"ModifySubnetAttribute": s.ModifySubnetAttribute,
 	}
 
 	return handlers[action]

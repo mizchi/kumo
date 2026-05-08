@@ -70,8 +70,11 @@ type Storage interface {
 	// Security Group operations
 	CreateSecurityGroup(ctx context.Context, req *CreateSecurityGroupRequest) (*SecurityGroup, error)
 	DeleteSecurityGroup(ctx context.Context, groupID, groupName string) error
+	DescribeSecurityGroups(ctx context.Context, groupIDs, groupNames []string) ([]*SecurityGroup, error)
 	AuthorizeSecurityGroupIngress(ctx context.Context, groupID, groupName string, permissions []IPPermission) error
 	AuthorizeSecurityGroupEgress(ctx context.Context, groupID string, permissions []IPPermission) error
+	RevokeSecurityGroupIngress(ctx context.Context, groupID, groupName string, permissions []IPPermission) error
+	RevokeSecurityGroupEgress(ctx context.Context, groupID string, permissions []IPPermission) error
 
 	// Key Pair operations
 	CreateKeyPair(ctx context.Context, keyName, keyType string) (*KeyPair, error)
@@ -82,21 +85,28 @@ type Storage interface {
 	CreateVpc(ctx context.Context, req *CreateVpcRequest) (*Vpc, error)
 	DeleteVpc(ctx context.Context, vpcID string) error
 	DescribeVpcs(ctx context.Context, vpcIDs []string) ([]*Vpc, error)
+	ModifyVpcAttribute(ctx context.Context, vpcID string, updates VpcAttributeUpdates) error
 
 	// Subnet operations
 	CreateSubnet(ctx context.Context, req *CreateSubnetRequest) (*Subnet, error)
 	DeleteSubnet(ctx context.Context, subnetID string) error
 	DescribeSubnets(ctx context.Context, subnetIDs []string, filters map[string][]string) ([]*Subnet, error)
+	ModifySubnetAttribute(ctx context.Context, subnetID string, updates SubnetAttributeUpdates) error
 
 	// Internet Gateway operations
 	CreateInternetGateway(ctx context.Context, req *CreateInternetGatewayRequest) (*InternetGateway, error)
 	AttachInternetGateway(ctx context.Context, igwID, vpcID string) error
+	DetachInternetGateway(ctx context.Context, igwID, vpcID string) error
+	DeleteInternetGateway(ctx context.Context, igwID string) error
 	DescribeInternetGateways(ctx context.Context, igwIDs []string) ([]*InternetGateway, error)
 
 	// Route Table operations
 	CreateRouteTable(ctx context.Context, req *CreateRouteTableRequest) (*RouteTable, error)
 	CreateRoute(ctx context.Context, req *CreateRouteRequest) error
+	DeleteRoute(ctx context.Context, rtbID, destinationCidr string) error
+	DeleteRouteTable(ctx context.Context, rtbID string) error
 	AssociateRouteTable(ctx context.Context, req *AssociateRouteTableRequest) (string, error)
+	DisassociateRouteTable(ctx context.Context, associationID string) error
 	DescribeRouteTables(ctx context.Context, rtbIDs []string) ([]*RouteTable, error)
 
 	// NAT Gateway operations
@@ -513,6 +523,97 @@ func (m *MemoryStorage) AuthorizeSecurityGroupEgress(_ context.Context, groupID 
 	return nil
 }
 
+// DescribeSecurityGroups returns SGs filtered by IDs and/or names.
+func (m *MemoryStorage) DescribeSecurityGroups(_ context.Context, groupIDs, groupNames []string) ([]*SecurityGroup, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(groupIDs) == 0 && len(groupNames) == 0 {
+		out := make([]*SecurityGroup, 0, len(m.SecurityGroups))
+		for _, sg := range m.SecurityGroups {
+			out = append(out, sg)
+		}
+
+		return out, nil
+	}
+
+	out := make([]*SecurityGroup, 0)
+
+	for _, id := range groupIDs {
+		sg, ok := m.SecurityGroups[id]
+		if !ok {
+			return nil, &Error{
+				Code:    "InvalidGroup.NotFound",
+				Message: fmt.Sprintf("The security group '%s' does not exist", id),
+			}
+		}
+
+		out = append(out, sg)
+	}
+
+	for _, name := range groupNames {
+		for _, sg := range m.SecurityGroups {
+			if sg.GroupName == name {
+				out = append(out, sg)
+			}
+		}
+	}
+
+	return out, nil
+}
+
+// RevokeSecurityGroupIngress removes matching ingress rules.
+func (m *MemoryStorage) RevokeSecurityGroupIngress(_ context.Context, groupID, groupName string, permissions []IPPermission) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sg := m.findSecurityGroup(groupID, groupName)
+	if sg == nil {
+		return &Error{Code: "InvalidGroup.NotFound", Message: "The security group does not exist"}
+	}
+
+	sg.IngressRules = removeMatchingPermissions(sg.IngressRules, permissions)
+
+	return nil
+}
+
+// RevokeSecurityGroupEgress removes matching egress rules.
+func (m *MemoryStorage) RevokeSecurityGroupEgress(_ context.Context, groupID string, permissions []IPPermission) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	sg, exists := m.SecurityGroups[groupID]
+	if !exists {
+		return &Error{Code: "InvalidGroup.NotFound", Message: fmt.Sprintf("The security group '%s' does not exist", groupID)}
+	}
+
+	sg.EgressRules = removeMatchingPermissions(sg.EgressRules, permissions)
+
+	return nil
+}
+
+func removeMatchingPermissions(existing, toRemove []IPPermission) []IPPermission {
+	out := make([]IPPermission, 0, len(existing))
+
+	for _, e := range existing {
+		match := false
+
+		for _, r := range toRemove {
+			if e.IPProtocol == r.IPProtocol && e.FromPort == r.FromPort && e.ToPort == r.ToPort {
+				match = true
+
+				break
+			}
+		}
+
+		if !match {
+			out = append(out, e)
+		}
+	}
+
+	return out
+}
+
 // CreateKeyPair creates a new key pair.
 func (m *MemoryStorage) CreateKeyPair(_ context.Context, keyName, _ string) (*KeyPair, error) {
 	m.mu.Lock()
@@ -761,12 +862,14 @@ func (m *MemoryStorage) CreateVpc(_ context.Context, req *CreateVpcRequest) (*Vp
 	defer m.mu.Unlock()
 
 	vpc := &Vpc{
-		VpcID:           "vpc-" + generateID(),
-		CidrBlock:       req.CidrBlock,
-		State:           "available",
-		IsDefault:       false,
-		InstanceTenancy: req.InstanceTenancy,
-		Tags:            []Tag{},
+		VpcID:              "vpc-" + generateID(),
+		CidrBlock:          req.CidrBlock,
+		State:              "available",
+		IsDefault:          false,
+		InstanceTenancy:    req.InstanceTenancy,
+		EnableDNSSupport:   true, // AWS default
+		EnableDNSHostnames: false,
+		Tags:               []Tag{},
 	}
 
 	if vpc.InstanceTenancy == "" {
@@ -1154,7 +1257,7 @@ func (m *MemoryStorage) DescribeRouteTables(_ context.Context, rtbIDs []string) 
 		rt, exists := m.RouteTables[id]
 		if !exists {
 			return nil, &Error{
-				Code:    "InvalidRouteTableId.NotFound",
+				Code:    "InvalidRouteTableID.NotFound",
 				Message: fmt.Sprintf("The routeTable ID '%s' does not exist", id),
 			}
 		}
@@ -1491,4 +1594,144 @@ func removeTags(existing, toRemove []Tag) []Tag {
 	}
 
 	return out
+}
+
+// ModifyVpcAttribute applies VPC attribute updates. Only set (non-nil) fields
+// are touched, matching the AWS one-attribute-per-call semantics.
+func (m *MemoryStorage) ModifyVpcAttribute(_ context.Context, vpcID string, updates VpcAttributeUpdates) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vpc, ok := m.Vpcs[vpcID]
+	if !ok {
+		return &Error{
+			Code:    "InvalidVpcID.NotFound",
+			Message: fmt.Sprintf("The vpc ID '%s' does not exist", vpcID),
+		}
+	}
+
+	if updates.EnableDNSHostnames != nil {
+		vpc.EnableDNSHostnames = *updates.EnableDNSHostnames
+	}
+
+	if updates.EnableDNSSupport != nil {
+		vpc.EnableDNSSupport = *updates.EnableDNSSupport
+	}
+
+	return nil
+}
+
+// ModifySubnetAttribute applies subnet attribute updates.
+func (m *MemoryStorage) ModifySubnetAttribute(_ context.Context, subnetID string, updates SubnetAttributeUpdates) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	subnet, ok := m.Subnets[subnetID]
+	if !ok {
+		return &Error{
+			Code:    "InvalidSubnetID.NotFound",
+			Message: fmt.Sprintf("The subnet ID '%s' does not exist", subnetID),
+		}
+	}
+
+	if updates.MapPublicIPOnLaunch != nil {
+		subnet.MapPublicIPOnLaunch = *updates.MapPublicIPOnLaunch
+	}
+
+	_ = updates.AssignIPv6AddressOnCreation // accepted but not modeled
+
+	return nil
+}
+
+// DetachInternetGateway removes the IGW's attachment to the given VPC.
+func (m *MemoryStorage) DetachInternetGateway(_ context.Context, igwID, vpcID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	igw, ok := m.InternetGateways[igwID]
+	if !ok {
+		return &Error{Code: "InvalidInternetGatewayID.NotFound", Message: fmt.Sprintf("The internetGateway ID '%s' does not exist", igwID)}
+	}
+
+	out := igw.Attachments[:0]
+
+	for _, a := range igw.Attachments {
+		if a.VpcID != vpcID {
+			out = append(out, a)
+		}
+	}
+
+	igw.Attachments = out
+
+	return nil
+}
+
+// DeleteInternetGateway removes an IGW. AWS rejects this if the IGW is still
+// attached, but kumo does not enforce that constraint.
+func (m *MemoryStorage) DeleteInternetGateway(_ context.Context, igwID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.InternetGateways[igwID]; !ok {
+		return &Error{Code: "InvalidInternetGatewayID.NotFound", Message: fmt.Sprintf("The internetGateway ID '%s' does not exist", igwID)}
+	}
+
+	delete(m.InternetGateways, igwID)
+
+	return nil
+}
+
+// DeleteRoute removes a route from a route table.
+func (m *MemoryStorage) DeleteRoute(_ context.Context, rtbID, destinationCidr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rtb, ok := m.RouteTables[rtbID]
+	if !ok {
+		return &Error{Code: "InvalidRouteTableID.NotFound", Message: fmt.Sprintf("The routeTable ID '%s' does not exist", rtbID)}
+	}
+
+	out := rtb.Routes[:0]
+
+	for _, r := range rtb.Routes {
+		if r.DestinationCidrBlock != destinationCidr {
+			out = append(out, r)
+		}
+	}
+
+	rtb.Routes = out
+
+	return nil
+}
+
+// DeleteRouteTable removes a route table.
+func (m *MemoryStorage) DeleteRouteTable(_ context.Context, rtbID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.RouteTables[rtbID]; !ok {
+		return &Error{Code: "InvalidRouteTableID.NotFound", Message: fmt.Sprintf("The routeTable ID '%s' does not exist", rtbID)}
+	}
+
+	delete(m.RouteTables, rtbID)
+
+	return nil
+}
+
+// DisassociateRouteTable removes an association by AssociationId.
+func (m *MemoryStorage) DisassociateRouteTable(_ context.Context, associationID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, rtb := range m.RouteTables {
+		for i, a := range rtb.Associations {
+			if a.RouteTableAssociationID == associationID {
+				rtb.Associations = append(rtb.Associations[:i], rtb.Associations[i+1:]...)
+
+				return nil
+			}
+		}
+	}
+
+	return &Error{Code: "InvalidAssociationID.NotFound", Message: fmt.Sprintf("The association ID '%s' does not exist", associationID)}
 }

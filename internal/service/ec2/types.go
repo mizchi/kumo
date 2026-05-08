@@ -37,6 +37,19 @@ type Tag struct {
 	Value string
 }
 
+// VpcAttributeUpdates carries optional VPC attribute changes. nil pointers
+// mean "leave as-is" since AWS modifies one attribute per call.
+type VpcAttributeUpdates struct {
+	EnableDNSHostnames *bool
+	EnableDNSSupport   *bool
+}
+
+// SubnetAttributeUpdates is the subnet equivalent.
+type SubnetAttributeUpdates struct {
+	MapPublicIPOnLaunch         *bool
+	AssignIPv6AddressOnCreation *bool
+}
+
 // SecurityGroup represents an EC2 security group.
 type SecurityGroup struct {
 	GroupID      string
@@ -283,6 +296,71 @@ type XMLAuthorizeSecurityGroupEgressResponse struct {
 	Return    bool     `xml:"return"`
 }
 
+// XMLDescribeSecurityGroupsResponse is the XML response for DescribeSecurityGroups.
+type XMLDescribeSecurityGroupsResponse struct {
+	XMLName          xml.Name            `xml:"DescribeSecurityGroupsResponse"`
+	Xmlns            string              `xml:"xmlns,attr"`
+	RequestID        string              `xml:"requestId"`
+	SecurityGroupSet XMLSecurityGroupSet `xml:"securityGroupInfo"`
+}
+
+// XMLSecurityGroupSet contains a list of security groups.
+type XMLSecurityGroupSet struct {
+	Items []XMLSecurityGroup `xml:"item"`
+}
+
+// XMLSecurityGroup represents a security group in XML format.
+type XMLSecurityGroup struct {
+	OwnerID             string             `xml:"ownerId"`
+	GroupID             string             `xml:"groupId"`
+	GroupName           string             `xml:"groupName"`
+	GroupDescription    string             `xml:"groupDescription"`
+	VpcID               string             `xml:"vpcId,omitempty"`
+	IPPermissions       XMLIPPermissionSet `xml:"ipPermissions"`
+	IPPermissionsEgress XMLIPPermissionSet `xml:"ipPermissionsEgress"`
+	TagSet              XMLTagSet          `xml:"tagSet"`
+}
+
+// XMLIPPermissionSet contains a list of IP permissions.
+type XMLIPPermissionSet struct {
+	Items []XMLIPPermission `xml:"item"`
+}
+
+// XMLIPPermission represents an IP permission rule in XML format.
+type XMLIPPermission struct {
+	IPProtocol string      `xml:"ipProtocol"`
+	FromPort   int         `xml:"fromPort,omitempty"`
+	ToPort     int         `xml:"toPort,omitempty"`
+	IPRanges   XMLIPRanges `xml:"ipRanges"`
+}
+
+// XMLIPRanges contains a list of IP ranges.
+type XMLIPRanges struct {
+	Items []XMLIPRange `xml:"item"`
+}
+
+// XMLIPRange represents a single IP range in XML format.
+type XMLIPRange struct {
+	CidrIP      string `xml:"cidrIp"`
+	Description string `xml:"description,omitempty"`
+}
+
+// XMLRevokeSecurityGroupIngressResponse is the XML response for RevokeSecurityGroupIngress.
+type XMLRevokeSecurityGroupIngressResponse struct {
+	XMLName   xml.Name `xml:"RevokeSecurityGroupIngressResponse"`
+	Xmlns     string   `xml:"xmlns,attr"`
+	RequestID string   `xml:"requestId"`
+	Return    bool     `xml:"return"`
+}
+
+// XMLRevokeSecurityGroupEgressResponse is the XML response for RevokeSecurityGroupEgress.
+type XMLRevokeSecurityGroupEgressResponse struct {
+	XMLName   xml.Name `xml:"RevokeSecurityGroupEgressResponse"`
+	Xmlns     string   `xml:"xmlns,attr"`
+	RequestID string   `xml:"requestId"`
+	Return    bool     `xml:"return"`
+}
+
 // XMLCreateKeyPairResponse is the XML response for CreateKeyPair.
 type XMLCreateKeyPairResponse struct {
 	XMLName        xml.Name `xml:"CreateKeyPairResponse"`
@@ -355,12 +433,14 @@ func (e *Error) Error() string {
 
 // Vpc represents a VPC.
 type Vpc struct {
-	VpcID           string
-	CidrBlock       string
-	State           string
-	IsDefault       bool
-	InstanceTenancy string
-	Tags            []Tag
+	VpcID              string
+	CidrBlock          string
+	State              string
+	IsDefault          bool
+	InstanceTenancy    string
+	EnableDNSHostnames bool
+	EnableDNSSupport   bool
+	Tags               []Tag
 }
 
 // Subnet represents a subnet.

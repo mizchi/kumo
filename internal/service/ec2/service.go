@@ -65,6 +65,9 @@ func (s *Service) Actions() []string {
 		"DeleteSecurityGroup",
 		"AuthorizeSecurityGroupIngress",
 		"AuthorizeSecurityGroupEgress",
+		"DescribeSecurityGroups",
+		"RevokeSecurityGroupIngress",
+		"RevokeSecurityGroupEgress",
 		// Key Pair operations
 		"CreateKeyPair",
 		"DeleteKeyPair",
@@ -80,12 +83,19 @@ func (s *Service) Actions() []string {
 		// Internet Gateway operations
 		"CreateInternetGateway",
 		"AttachInternetGateway",
+		"DetachInternetGateway",
+		"DeleteInternetGateway",
 		"DescribeInternetGateways",
 		// Route Table operations
 		"CreateRouteTable",
 		"CreateRoute",
+		"DeleteRoute",
+		"DeleteRouteTable",
 		"AssociateRouteTable",
+		"DisassociateRouteTable",
 		"DescribeRouteTables",
+		// Network interfaces (stub)
+		"DescribeNetworkInterfaces",
 		// NAT Gateway operations
 		"CreateNatGateway",
 		"DescribeNatGateways",
@@ -93,6 +103,10 @@ func (s *Service) Actions() []string {
 		"CreateTags",
 		"DeleteTags",
 		"DescribeTags",
+		// VPC / Subnet attribute operations
+		"ModifyVpcAttribute",
+		"DescribeVpcAttribute",
+		"ModifySubnetAttribute",
 	}
 }
 
