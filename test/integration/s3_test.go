@@ -5,6 +5,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -315,6 +316,119 @@ func TestS3_ListObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	golden.New(t, golden.WithIgnoreFields("ETag", "LastModified", "ResultMetadata")).Assert(t.Name()+"_prefix", result)
+}
+
+func TestS3_ListObjectsV2_Pagination(t *testing.T) {
+	client := newS3Client(t)
+	ctx := t.Context()
+	bucketName := "test-list-objects-pagination"
+
+	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)}); err != nil {
+		t.Fatalf("failed to create bucket: %v", err)
+	}
+
+	const total = 1500
+	keys := make([]string, total)
+
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("page/%05d.txt", i)
+		keys[i] = key
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(key),
+			Body:   strings.NewReader("x"),
+		})
+		if err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, k := range keys {
+			_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucketName), Key: aws.String(k),
+			})
+		}
+		_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+	})
+
+	// Walk all pages using NextContinuationToken.
+	var (
+		token *string
+		seen  int
+		pages int
+	)
+
+	for {
+		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucketName),
+			Prefix:            aws.String("page/"),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+
+		pages++
+		seen += len(out.Contents)
+
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			break
+		}
+
+		if out.NextContinuationToken == nil || *out.NextContinuationToken == "" {
+			t.Fatalf("page %d: IsTruncated but NextContinuationToken empty", pages)
+		}
+
+		token = out.NextContinuationToken
+	}
+
+	if seen != total {
+		t.Fatalf("paginated count mismatch: got %d want %d (pages=%d)", seen, total, pages)
+	}
+
+	if pages < 2 {
+		t.Fatalf("expected pagination across multiple pages, got pages=%d", pages)
+	}
+
+	// MaxKeys controls page size; verify one full page returns exactly MaxKeys entries.
+	out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucketName),
+		Prefix:  aws.String("page/"),
+		MaxKeys: aws.Int32(50),
+	})
+	if err != nil {
+		t.Fatalf("MaxKeys list: %v", err)
+	}
+
+	if len(out.Contents) != 50 {
+		t.Fatalf("MaxKeys=50 returned %d entries", len(out.Contents))
+	}
+
+	if out.IsTruncated == nil || !*out.IsTruncated {
+		t.Fatalf("MaxKeys=50 with 1500 keys should be truncated")
+	}
+
+	// StartAfter should skip lexicographically earlier keys.
+	out, err = client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:     aws.String(bucketName),
+		Prefix:     aws.String("page/"),
+		StartAfter: aws.String("page/00099.txt"),
+		MaxKeys:    aws.Int32(3),
+	})
+	if err != nil {
+		t.Fatalf("StartAfter list: %v", err)
+	}
+
+	if len(out.Contents) == 0 || aws.ToString(out.Contents[0].Key) != "page/00100.txt" {
+		got := ""
+		if len(out.Contents) > 0 {
+			got = aws.ToString(out.Contents[0].Key)
+		}
+
+		t.Fatalf("StartAfter expected first key page/00100.txt, got %q", got)
+	}
 }
 
 func newS3PresignClient(t *testing.T) *s3.PresignClient {

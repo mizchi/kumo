@@ -37,7 +37,7 @@ type Storage interface {
 	DeleteObject(ctx context.Context, bucket, key string) (*Object, error)
 	DeleteObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error)
 	HeadObject(ctx context.Context, bucket, key string) (*Object, error)
-	ListObjects(ctx context.Context, bucket, prefix, delimiter string, maxKeys int) ([]Object, []string, error)
+	ListObjects(ctx context.Context, bucket, prefix, delimiter, startAfter string, maxKeys int) ([]Object, []string, bool, error)
 
 	// Versioning operations
 	PutBucketVersioning(ctx context.Context, bucket, status string) error
@@ -519,13 +519,23 @@ func (s *MemoryStorage) HeadObject(_ context.Context, bucket, key string) (*Obje
 }
 
 // ListObjects lists objects in a bucket.
-func (s *MemoryStorage) ListObjects(_ context.Context, bucket, prefix, delimiter string, maxKeys int) ([]Object, []string, error) {
+//
+// The startAfter argument is exclusive: keys lexicographically less than or
+// equal to it are skipped. For ListObjectsV2 the caller supplies either the
+// previous response's NextContinuationToken or the StartAfter parameter; both
+// map to startAfter here. For the legacy ListObjects (V1) the caller passes
+// the Marker parameter the same way.
+//
+// The returned bool is true when the bucket contained more matching keys than
+// could fit in the response, indicating the caller should issue another
+// request with the last returned key as the continuation point.
+func (s *MemoryStorage) ListObjects(_ context.Context, bucket, prefix, delimiter, startAfter string, maxKeys int) ([]Object, []string, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	b, exists := s.Buckets[bucket]
 	if !exists {
-		return nil, nil, &BucketError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", BucketName: bucket}
+		return nil, nil, false, &BucketError{Code: "NoSuchBucket", Message: "The specified bucket does not exist", BucketName: bucket}
 	}
 
 	if maxKeys <= 0 {
@@ -544,23 +554,43 @@ func (s *MemoryStorage) ListObjects(_ context.Context, bucket, prefix, delimiter
 		}
 	}
 
-	// Sort keys for consistent ordering
+	// Sort keys for consistent (and pagination-stable) ordering.
 	sort.Strings(keys)
 
+	truncated := false
+
 	for _, key := range keys {
+		if startAfter != "" && key <= startAfter {
+			continue
+		}
+
 		obj := b.Objects[key]
 
-		// Handle delimiter
+		// Handle delimiter: the "directory" between prefix and the next
+		// delimiter collapses into a CommonPrefix. CommonPrefixes count
+		// against maxKeys the same as Contents do.
 		if delimiter != "" {
-			// Find the part after prefix
 			remainder := strings.TrimPrefix(key, prefix)
 			if idx := strings.Index(remainder, delimiter); idx >= 0 {
-				// This is a common prefix
 				commonPrefix := prefix + remainder[:idx+len(delimiter)]
-				commonPrefixes[commonPrefix] = true
+				if !commonPrefixes[commonPrefix] {
+					if len(objects)+len(commonPrefixes) >= maxKeys {
+						truncated = true
+
+						break
+					}
+
+					commonPrefixes[commonPrefix] = true
+				}
 
 				continue
 			}
+		}
+
+		if len(objects)+len(commonPrefixes) >= maxKeys {
+			truncated = true
+
+			break
 		}
 
 		objects = append(objects, Object{
@@ -569,10 +599,6 @@ func (s *MemoryStorage) ListObjects(_ context.Context, bucket, prefix, delimiter
 			Size:         obj.Size,
 			LastModified: obj.LastModified,
 		})
-
-		if len(objects) >= maxKeys {
-			break
-		}
 	}
 
 	// Convert common prefixes to sorted slice
@@ -583,7 +609,7 @@ func (s *MemoryStorage) ListObjects(_ context.Context, bucket, prefix, delimiter
 
 	sort.Strings(prefixList)
 
-	return objects, prefixList, nil
+	return objects, prefixList, truncated, nil
 }
 
 // PutBucketVersioning sets the versioning status of a bucket.
