@@ -66,11 +66,12 @@ func (s *Service) initActionHandlers() {
 		"DeleteAccessKey": s.DeleteAccessKey,
 		"ListAccessKeys":  s.ListAccessKeys,
 		// Inline role policies
-		"PutRolePolicy":            s.PutRolePolicy,
-		"GetRolePolicy":            s.GetRolePolicy,
-		"DeleteRolePolicy":         s.DeleteRolePolicy,
-		"ListRolePolicies":         s.ListRolePolicies,
-		"ListAttachedRolePolicies": s.ListAttachedRolePolicies,
+		"PutRolePolicy":               s.PutRolePolicy,
+		"GetRolePolicy":               s.GetRolePolicy,
+		"DeleteRolePolicy":            s.DeleteRolePolicy,
+		"ListRolePolicies":            s.ListRolePolicies,
+		"ListAttachedRolePolicies":    s.ListAttachedRolePolicies,
+		"ListInstanceProfilesForRole": s.ListInstanceProfilesForRole,
 		// OpenID Connect provider
 		"CreateOpenIDConnectProvider":           s.CreateOpenIDConnectProvider,
 		"GetOpenIDConnectProvider":              s.GetOpenIDConnectProvider,
