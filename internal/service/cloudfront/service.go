@@ -64,6 +64,18 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.Handle("GET", "/2020-05-31/key-group/{id}", s.GetKeyGroup)
 	r.Handle("DELETE", "/2020-05-31/key-group/{id}", s.DeleteKeyGroup)
 
+	// CloudFront Functions operations. CreateFunction / ListFunctions
+	// share the /function path with method-based dispatch; the rest are
+	// keyed by Name with optional /describe / /publish / /test suffixes.
+	r.Handle("POST", "/2020-05-31/function", s.CreateFunction)
+	r.Handle("GET", "/2020-05-31/function", s.ListFunctions)
+	r.Handle("GET", "/2020-05-31/function/{Name}", s.GetFunction)
+	r.Handle("GET", "/2020-05-31/function/{Name}/describe", s.DescribeFunction)
+	r.Handle("PUT", "/2020-05-31/function/{Name}", s.UpdateFunction)
+	r.Handle("POST", "/2020-05-31/function/{Name}/publish", s.PublishFunction)
+	r.Handle("POST", "/2020-05-31/function/{Name}/test", s.TestFunction)
+	r.Handle("DELETE", "/2020-05-31/function/{Name}", s.DeleteFunction)
+
 	// Edge — proxies real requests through the cache layer. Lives
 	// under /kumo (the existing admin prefix) so it doesn't collide
 	// with the S3 wildcard /{bucket}/{key...}. Non-cacheable methods
