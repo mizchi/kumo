@@ -61,6 +61,10 @@ func (s *Service) Actions() []string {
 		"DeregisterTargets",
 		"CreateListener",
 		"DeleteListener",
+		"ModifyLoadBalancerAttributes",
+		"DescribeLoadBalancerAttributes",
+		"ModifyTargetGroupAttributes",
+		"DescribeTargetGroupAttributes",
 	}
 }
 
