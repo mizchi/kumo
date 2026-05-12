@@ -10,6 +10,7 @@ import (
 	kumocli "github.com/sivchari/kumo/cli"
 	"github.com/sivchari/kumo/internal/server"
 	_ "github.com/sivchari/kumo/internal/service/acm" // Register services via init().
+	_ "github.com/sivchari/kumo/internal/service/amp"
 	_ "github.com/sivchari/kumo/internal/service/amplify"
 	_ "github.com/sivchari/kumo/internal/service/apigateway"
 	_ "github.com/sivchari/kumo/internal/service/appmesh"
