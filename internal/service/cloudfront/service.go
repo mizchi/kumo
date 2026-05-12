@@ -3,10 +3,17 @@ package cloudfront
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/sivchari/kumo/internal/service"
 )
+
+// originRequestTimeout caps a single origin round-trip. Long enough
+// for slow upstreams under test, short enough that a wedged origin
+// can't pin goroutines indefinitely.
+const originRequestTimeout = 30 * time.Second
 
 // Compile-time check that Service implements io.Closer.
 var _ io.Closer = (*Service)(nil)
@@ -22,8 +29,9 @@ func init() {
 
 // Service implements the CloudFront service.
 type Service struct {
-	storage   Storage
-	edgeCache *edgeCache
+	storage    Storage
+	edgeCache  *edgeCache
+	httpClient *http.Client
 }
 
 // New creates a new CloudFront service.
@@ -31,6 +39,9 @@ func New(storage Storage) *Service {
 	return &Service{
 		storage:   storage,
 		edgeCache: newEdgeCache(),
+		httpClient: &http.Client{
+			Timeout: originRequestTimeout,
+		},
 	}
 }
 

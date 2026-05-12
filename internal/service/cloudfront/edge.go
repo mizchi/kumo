@@ -16,6 +16,13 @@ import (
 )
 
 // cacheEntry is one cached response variant for a distribution.
+//
+// Entries are effectively immutable after store(): the only mutable
+// state is `revalidating` (guarded by revalidateMu), which is used to
+// dedup background refresh goroutines. Any freshness update — whether
+// from a foreground revalidation or a background SWR refresh — produces
+// a NEW entry that store-replaces the old one, so concurrent readers
+// holding the old pointer never observe a torn write.
 type cacheEntry struct {
 	StatusCode           int
 	Header               http.Header
@@ -31,6 +38,27 @@ type cacheEntry struct {
 	revalidateMu         sync.Mutex        // protects `revalidating`
 }
 
+// refreshed returns a copy of e with headers merged from a 304 response
+// and freshness reset relative to `now`. The original entry is untouched
+// so concurrent readers holding it stay race-free.
+func (e *cacheEntry) refreshed(fresh http.Header, ttl time.Duration, now time.Time) *cacheEntry {
+	hdr := e.Header.Clone()
+	mergeRevalidatedHeaders(hdr, fresh)
+
+	return &cacheEntry{
+		StatusCode:           e.StatusCode,
+		Header:               hdr,
+		Body:                 e.Body,
+		StoredAt:             now,
+		InitialAge:           0,
+		TTL:                  ttl,
+		StaleWhileRevalidate: e.StaleWhileRevalidate,
+		StaleIfError:         e.StaleIfError,
+		Vary:                 e.Vary,
+		VaryValues:           e.VaryValues,
+	}
+}
+
 // age is the entry's current age — RFC 9111 §5.1: time we've held it
 // + Age the origin reported when we stored it.
 func (e *cacheEntry) age() time.Duration {
@@ -44,13 +72,82 @@ func (e *cacheEntry) age() time.Duration {
 // The two-level layout matches RFC 7234's "secondary key": the base
 // gets you to the resource, the variant list resolves the right
 // representation given the request's Vary'd headers.
+//
+// A simple oldest-StoredAt eviction caps total variant count at
+// maxEntries so long-running processes don't grow without bound. The
+// cap is intentionally coarse — there's no per-byte budget and no LRU
+// — but it prevents the unbounded-growth OOM that the unbounded map
+// otherwise produced.
 type edgeCache struct {
-	mu      sync.Mutex
-	entries map[string]map[string][]*cacheEntry // distId → base → variants
+	mu         sync.Mutex
+	entries    map[string]map[string][]*cacheEntry // distId → base → variants
+	count      int
+	maxEntries int
 }
 
+// defaultMaxEntries is the cap when the env var isn't set. 1024 is
+// a deliberate "small enough to bound memory, large enough to be
+// useful for tests + light workloads" pick.
+const defaultMaxEntries = 1024
+
 func newEdgeCache() *edgeCache {
-	return &edgeCache{entries: make(map[string]map[string][]*cacheEntry)}
+	return &edgeCache{
+		entries:    make(map[string]map[string][]*cacheEntry),
+		maxEntries: edgeCacheMaxEntries(),
+	}
+}
+
+// edgeCacheMaxEntries reads KUMO_CLOUDFRONT_MAX_ENTRIES, falling back
+// to defaultMaxEntries when unset or invalid.
+func edgeCacheMaxEntries() int {
+	if v := os.Getenv("KUMO_CLOUDFRONT_MAX_ENTRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+
+	return defaultMaxEntries
+}
+
+// evictOldestLocked drops the entry with the smallest StoredAt across
+// the whole cache. Caller must hold c.mu.
+func (c *edgeCache) evictOldestLocked() {
+	var (
+		oldestDist string
+		oldestBase string
+		oldestIdx  = -1
+		oldestAt   time.Time
+	)
+
+	for distID, bases := range c.entries {
+		for base, variants := range bases {
+			for i, v := range variants {
+				if oldestIdx == -1 || v.StoredAt.Before(oldestAt) {
+					oldestDist = distID
+					oldestBase = base
+					oldestIdx = i
+					oldestAt = v.StoredAt
+				}
+			}
+		}
+	}
+
+	if oldestIdx == -1 {
+		return
+	}
+
+	variants := c.entries[oldestDist][oldestBase]
+	c.entries[oldestDist][oldestBase] = append(variants[:oldestIdx], variants[oldestIdx+1:]...)
+
+	if len(c.entries[oldestDist][oldestBase]) == 0 {
+		delete(c.entries[oldestDist], oldestBase)
+	}
+
+	if len(c.entries[oldestDist]) == 0 {
+		delete(c.entries, oldestDist)
+	}
+
+	c.count--
 }
 
 // lookup finds a variant whose Vary'd header values match those on the
@@ -94,6 +191,11 @@ func (c *edgeCache) store(distID, base string, entry *cacheEntry) {
 	}
 
 	c.entries[distID][base] = append(variants, entry)
+	c.count++
+
+	for c.maxEntries > 0 && c.count > c.maxEntries {
+		c.evictOldestLocked()
+	}
 }
 
 // matchesVary reports whether the request's headers for the entry's
@@ -176,12 +278,23 @@ func collapseWhitespace(s string) string {
 // sameVarySignature checks two entries declare the same Vary headers
 // AND equivalent values (used during store to overwrite stale
 // variants).
+//
+// Vary slices come from cache.VaryHeaders, which returns them sorted
+// and lowercased, so a direct element-wise comparison of the names is
+// sufficient — and necessary: comparing only a.Vary's keys against
+// b.VaryValues lets a `["accept-encoding"]` entry collide with a
+// `["accept-language"]` one (both lookups return empty string and
+// compare equal).
 func sameVarySignature(a, b *cacheEntry) bool {
 	if len(a.Vary) != len(b.Vary) {
 		return false
 	}
 
-	for _, name := range a.Vary {
+	for i, name := range a.Vary {
+		if name != b.Vary[i] {
+			return false
+		}
+
 		if !varyValueEqual(name, a.VaryValues[name], b.VaryValues[name]) {
 			return false
 		}
@@ -251,7 +364,7 @@ func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, err := fetchOrigin(originURL, r)
+	upstream, err := fetchOrigin(s.httpClient, originURL, r)
 	if err != nil {
 		http.Error(w, "origin fetch failed: "+err.Error(), http.StatusBadGateway)
 
@@ -336,15 +449,16 @@ func (s *Service) kickBackgroundRevalidate(distID, base string, r *http.Request,
 			return
 		}
 
-		upstream, err := revalidateOrigin(originURL, cloned, cond)
+		upstream, err := revalidateOrigin(s.httpClient, originURL, cloned, cond)
 		if err != nil {
 			return
 		}
 
 		if upstream.StatusCode == http.StatusNotModified {
-			mergeRevalidatedHeaders(entry.Header, upstream.Header)
-			entry.StoredAt = time.Now()
-			entry.TTL = cache.EffectiveTTL(entry.Header, cfg, time.Now())
+			now := time.Now()
+			refreshed := entry.refreshed(upstream.Header, 0, now)
+			refreshed.TTL = cache.EffectiveTTL(refreshed.Header, cfg, now)
+			s.edgeCache.store(distID, base, refreshed)
 
 			return
 		}
@@ -387,7 +501,7 @@ func (s *Service) revalidate(w http.ResponseWriter, r *http.Request, distID, bas
 		return false
 	}
 
-	upstream, err := revalidateOrigin(originURL, r, cond)
+	upstream, err := revalidateOrigin(s.httpClient, originURL, r, cond)
 	if err != nil {
 		http.Error(w, "origin revalidate failed: "+err.Error(), http.StatusBadGateway)
 
@@ -395,12 +509,13 @@ func (s *Service) revalidate(w http.ResponseWriter, r *http.Request, distID, bas
 	}
 
 	if upstream.StatusCode == http.StatusNotModified {
-		// Refresh: keep the cached body, update headers + reset TTL.
-		mergeRevalidatedHeaders(entry.Header, upstream.Header)
-		entry.StoredAt = time.Now()
-		entry.TTL = cache.EffectiveTTL(entry.Header, cfg, time.Now())
-
-		serveFromCache(w, r, entry, 0)
+		// Refresh: build a new entry (immutable-after-store invariant)
+		// with merged headers and a reset TTL, then serve from it.
+		now := time.Now()
+		refreshed := entry.refreshed(upstream.Header, 0, now)
+		refreshed.TTL = cache.EffectiveTTL(refreshed.Header, cfg, now)
+		s.edgeCache.store(distID, base, refreshed)
+		serveFromCache(w, r, refreshed, 0)
 
 		return true
 	}
@@ -497,7 +612,7 @@ func isHopByHopHeader(name string) bool {
 		"Proxy-Authenticate",
 		"Proxy-Authorization",
 		"Te",
-		"Trailers",
+		"Trailer",
 		"Transfer-Encoding",
 		"Upgrade",
 		"Host":
@@ -510,7 +625,7 @@ func isHopByHopHeader(name string) bool {
 // passthrough forwards the request body verbatim, returns the response
 // without touching the cache. Used for PUT / POST / DELETE / PATCH.
 func (s *Service) passthrough(w http.ResponseWriter, r *http.Request, originURL string) {
-	upstream, err := forwardOrigin(originURL, r)
+	upstream, err := forwardOrigin(s.httpClient, originURL, r)
 	if err != nil {
 		http.Error(w, "origin fetch failed: "+err.Error(), http.StatusBadGateway)
 
@@ -687,21 +802,21 @@ type originResponse struct {
 // fetchOrigin sends a body-less request upstream (GET/HEAD) and
 // returns the buffered response. We need the body twice (once to
 // serve, once to cache), so it's read into memory here.
-func fetchOrigin(target string, r *http.Request) (*originResponse, error) {
-	return originRequest(target, r, http.NoBody)
+func fetchOrigin(client *http.Client, target string, r *http.Request) (*originResponse, error) {
+	return originRequest(client, target, r, http.NoBody)
 }
 
 // forwardOrigin proxies a non-cacheable request (PUT/POST/DELETE/PATCH)
 // with its body intact. The cache is not consulted.
-func forwardOrigin(target string, r *http.Request) (*originResponse, error) {
-	return originRequest(target, r, r.Body)
+func forwardOrigin(client *http.Client, target string, r *http.Request) (*originResponse, error) {
+	return originRequest(client, target, r, r.Body)
 }
 
 // revalidateOrigin sends a body-less GET/HEAD with the supplied
 // conditional headers attached. Used for stale-entry refresh; if the
 // origin returns 304 the cache extends the existing entry, otherwise
 // it replaces it.
-func revalidateOrigin(target string, r *http.Request, conditional http.Header) (*originResponse, error) {
+func revalidateOrigin(client *http.Client, target string, r *http.Request, conditional http.Header) (*originResponse, error) {
 	clone := r.Clone(r.Context())
 
 	// Drop client-supplied conditionals so the cache's own validators
@@ -716,12 +831,12 @@ func revalidateOrigin(target string, r *http.Request, conditional http.Header) (
 		}
 	}
 
-	return originRequest(target, clone, http.NoBody)
+	return originRequest(client, target, clone, http.NoBody)
 }
 
 // originRequest is the shared upstream request path used by both
 // fetchOrigin and forwardOrigin.
-func originRequest(target string, r *http.Request, reqBody io.Reader) (*originResponse, error) {
+func originRequest(client *http.Client, target string, r *http.Request, reqBody io.Reader) (*originResponse, error) {
 	parsed, err := url.Parse(target)
 	if err != nil {
 		return nil, fmt.Errorf("parse origin URL: %w", err)
@@ -746,7 +861,7 @@ func originRequest(target string, r *http.Request, reqBody io.Reader) (*originRe
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("origin Do: %w", err)
 	}
@@ -768,7 +883,7 @@ func storeIfCacheable(c *edgeCache, distID, base string, r *http.Request, resp *
 		return
 	}
 
-	cacheable, _ := cache.IsCacheable(resp.Header, resp.StatusCode)
+	cacheable, _ := cache.IsCacheableWithConfig(resp.Header, resp.StatusCode, cfg)
 	if !cacheable {
 		return
 	}

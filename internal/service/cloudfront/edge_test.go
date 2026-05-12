@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestEdge_HitMissPattern stands up a tiny origin and walks through
@@ -430,4 +431,67 @@ func callEdge(t *testing.T, svc *Service, _, path string, hdr http.Header) *http
 	svc.Edge(w, req)
 
 	return w
+}
+
+// TestSameVarySignature_DifferentNames pins the false-positive fix in
+// sameVarySignature. Two entries that Vary on *different* header names
+// must not be treated as the same variant — even when both
+// happen to record empty values for the other entry's names.
+func TestSameVarySignature_DifferentNames(t *testing.T) {
+	t.Parallel()
+
+	a := &cacheEntry{
+		Vary:       []string{"accept-encoding"},
+		VaryValues: map[string]string{"accept-encoding": ""},
+	}
+	b := &cacheEntry{
+		Vary:       []string{"accept-language"},
+		VaryValues: map[string]string{"accept-language": ""},
+	}
+
+	if sameVarySignature(a, b) {
+		t.Fatalf("Vary [accept-encoding] vs [accept-language] should NOT collide")
+	}
+}
+
+// TestEdgeCache_EvictsOldestWhenOverCap confirms the simple eviction
+// keeps the cache bounded. With maxEntries=2 and three inserts, the
+// oldest entry by StoredAt must be the one dropped.
+func TestEdgeCache_EvictsOldestWhenOverCap(t *testing.T) {
+	t.Parallel()
+
+	c := newEdgeCache()
+	c.maxEntries = 2
+
+	now := time.Now()
+	c.store("d", "a", &cacheEntry{StoredAt: now.Add(-3 * time.Second)})
+	c.store("d", "b", &cacheEntry{StoredAt: now.Add(-2 * time.Second)})
+	c.store("d", "c", &cacheEntry{StoredAt: now.Add(-1 * time.Second)})
+
+	if c.count != 2 {
+		t.Fatalf("count after eviction: got %d, want 2", c.count)
+	}
+
+	if _, ok := c.entries["d"]["a"]; ok {
+		t.Fatalf("oldest entry 'a' should have been evicted")
+	}
+
+	if _, ok := c.entries["d"]["b"]; !ok {
+		t.Fatalf("entry 'b' should still be present")
+	}
+
+	if _, ok := c.entries["d"]["c"]; !ok {
+		t.Fatalf("newest entry 'c' should still be present")
+	}
+}
+
+// TestIsHopByHopHeader_Trailer pins that the header is recognised by
+// its RFC 7230 §4.4 name "Trailer" (singular), not the common "Trailers"
+// misspelling.
+func TestIsHopByHopHeader_Trailer(t *testing.T) {
+	t.Parallel()
+
+	if !isHopByHopHeader("Trailer") {
+		t.Fatalf("Trailer must be hop-by-hop per RFC 7230 §4.4")
+	}
 }
