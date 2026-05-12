@@ -141,6 +141,39 @@ func TestIsCacheable(t *testing.T) {
 	}
 }
 
+// TestEffectiveTTL_MinTTLOverridesNoStore pins the AWS CloudFront
+// behaviour where a positive distribution MinTTL forces caching even
+// when the origin sends Cache-Control: no-store (or private). With
+// MinTTL=0 the no-store directive is honoured normally.
+func TestEffectiveTTL_MinTTLOverridesNoStore(t *testing.T) {
+	t.Parallel()
+
+	noStore := http.Header{"Cache-Control": {"no-store"}}
+	priv := http.Header{"Cache-Control": {"private"}}
+
+	zero := DistributionConfig{MinTTL: 0, DefaultTTL: time.Hour, MaxTTL: 24 * time.Hour}
+	if got := EffectiveTTL(noStore, zero, now); got != 0 {
+		t.Fatalf("no-store with MinTTL=0 should return 0, got %v", got)
+	}
+
+	withMin := DistributionConfig{MinTTL: 30 * time.Second, DefaultTTL: time.Hour, MaxTTL: 24 * time.Hour}
+	if got := EffectiveTTL(noStore, withMin, now); got != 30*time.Second {
+		t.Fatalf("no-store with MinTTL=30s should return MinTTL, got %v", got)
+	}
+
+	if got := EffectiveTTL(priv, withMin, now); got != 30*time.Second {
+		t.Fatalf("private with MinTTL=30s should return MinTTL, got %v", got)
+	}
+
+	if ok, _ := IsCacheableWithConfig(noStore, 200, withMin); !ok {
+		t.Fatalf("no-store with MinTTL>0 should be cacheable")
+	}
+
+	if ok, _ := IsCacheableWithConfig(noStore, 200, zero); ok {
+		t.Fatalf("no-store with MinTTL=0 should NOT be cacheable")
+	}
+}
+
 // TestMustRevalidate covers the freshness-side meaning of no-cache.
 // must-revalidate is intentionally NOT included — it constrains
 // stale-entry serving, not fresh-entry serving (RFC 9111 §5.2.2.2).

@@ -47,6 +47,15 @@ type DistributionConfig struct {
 func EffectiveTTL(respHeader http.Header, cfg DistributionConfig, now time.Time) time.Duration {
 	cc := mergedCacheControl(respHeader)
 	if cc.NoStore || cc.Private {
+		// CloudFront override: when MinTTL > 0 the distribution forces
+		// caching for at least that long even when the origin says
+		// no-store / private. Matches the AWS documented behaviour
+		// "If you set Minimum TTL to a positive number, CloudFront
+		// ignores the no-cache, no-store, and private directives".
+		if cfg.MinTTL > 0 {
+			return cfg.MinTTL
+		}
+
 		return 0
 	}
 
@@ -178,13 +187,25 @@ func ReadCDNStaleDirectives(respHeader http.Header) CDNStaleDirectives {
 // (RFC 9110 §15) is stored — that's the small list CloudFront
 // defaults to.
 func IsCacheable(respHeader http.Header, statusCode int) (bool, string) {
+	return IsCacheableWithConfig(respHeader, statusCode, DistributionConfig{})
+}
+
+// IsCacheableWithConfig is IsCacheable with awareness of the
+// distribution's MinTTL. When MinTTL > 0 CloudFront overrides the
+// origin's no-store / private directives and caches the response
+// anyway (provided the status code is one CloudFront stores).
+func IsCacheableWithConfig(respHeader http.Header, statusCode int, cfg DistributionConfig) (bool, string) {
 	cc := mergedCacheControl(respHeader)
 	if cc.NoStore {
-		return false, "Cache-Control: no-store"
+		if cfg.MinTTL <= 0 {
+			return false, "Cache-Control: no-store"
+		}
 	}
 
 	if cc.Private {
-		return false, "Cache-Control: private"
+		if cfg.MinTTL <= 0 {
+			return false, "Cache-Control: private"
+		}
 	}
 
 	if hasExplicitFreshness(respHeader) {
