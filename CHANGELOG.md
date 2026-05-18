@@ -1,5 +1,7 @@
 # Changelog
 
+## [v0.21.0](https://github.com/mizchi/kumo/commits/v0.21.0) - 2026-05-18
+
 ## [v0.21.0](https://github.com/sivchari/kumo/compare/v0.20.0...v0.21.0) - 2026-05-18
 - feat(ssm): no-op stubs for ListTagsForResource / AddTagsToResource / RemoveTagsFromResource by @sivchari in https://github.com/sivchari/kumo/pull/626
 - feat(sqs): support Policy attribute in SetQueueAttributes / GetQueueAttributes by @sivchari in https://github.com/sivchari/kumo/pull/627
