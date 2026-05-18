@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sivchari/kumo/internal/latency"
+	"github.com/sivchari/kumo/internal/chaos"
 	"github.com/sivchari/kumo/internal/servicecatalog"
 )
 
@@ -31,6 +32,7 @@ type Router struct {
 	logger        *slog.Logger
 	catalog       *servicecatalog.Catalog
 	latencyEngine *latency.Engine
+	chaosEngine   *chaos.Engine
 	jsonPrefixes  map[string]string
 	cborNames     map[string]string
 }
@@ -182,6 +184,10 @@ func (r *Router) wrapHandler(method, pattern, serviceName string, handler http.H
 			case <-req.Context().Done():
 				timer.Stop()
 			}
+		}
+
+		if r.evaluateChaos(&info, wrapped, req) {
+			return
 		}
 
 		// Call the actual handler

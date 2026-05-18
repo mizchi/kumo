@@ -19,6 +19,7 @@ import (
 
 	"github.com/sivchari/kumo/internal/initdir"
 	"github.com/sivchari/kumo/internal/latency"
+	"github.com/sivchari/kumo/internal/chaos"
 	"github.com/sivchari/kumo/internal/service"
 	"github.com/sivchari/kumo/internal/servicecatalog"
 )
@@ -30,6 +31,7 @@ type Config struct {
 	LogLevel      slog.Level
 	InitDir       string // Directory containing init scripts to execute on startup
 	LatencyConfig string // JSON latency emulator config loaded on startup
+	ChaosEnabled  bool   // Enables /kumo/chaos/* runtime endpoints
 }
 
 // DefaultConfig returns the default server configuration.
@@ -87,6 +89,7 @@ type Server struct {
 	cborDispatcher  *CBORProtocolDispatcher
 	catalog         *servicecatalog.Catalog
 	latencyEngine   *latency.Engine
+	chaosEngine     *chaos.Engine
 	logger          *slog.Logger
 	server          *http.Server
 }
@@ -127,6 +130,10 @@ func New(config Config) *Server {
 		} else {
 			logger.Info("loaded latency config", "path", config.LatencyConfig)
 		}
+	}
+
+	if config.ChaosEnabled || os.Getenv("KUMO_CHAOS_ENABLED") == "1" {
+		srv.SetChaosEngine(chaos.NewEngine(catalog))
 	}
 
 	// Auto-register services from global registry
